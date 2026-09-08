@@ -55,6 +55,7 @@ class PlayerViewModel @Inject constructor(
 
     private val contentType: String = checkNotNull(savedStateHandle[Screen.Player.ARG_CONTENT_TYPE])
     private val contentId: String = checkNotNull(savedStateHandle[Screen.Player.ARG_CONTENT_ID])
+    private val nextArg: String? = savedStateHandle[Screen.Player.ARG_NEXT]
 
     private var currentUrl: String = ""
     private var preferredEngine: PlayerEngineType = PlayerEngineType.AUTO
@@ -103,18 +104,18 @@ class PlayerViewModel @Inject constructor(
             when (contentType) {
                 "live" -> {
                     val streamId = contentId.toIntOrNull() ?: return@launch
-                    playUrl(urlBuilder.buildLiveUrl(streamId), "بث مباشر")
+                    playUrl(urlBuilder.buildLiveUrl(streamId), "بث مباشر", nextArg)
                 }
                 "series" -> {
                     // contentId هنا هو معرّف الحلقة كما يُرجعه Xtream (قد لا يكون رقماً صرفاً)
-                    playUrl(urlBuilder.buildEpisodeUrl(contentId, extension = "mp4"), "حلقة")
+                    playUrl(urlBuilder.buildEpisodeUrl(contentId, extension = "mp4"), "حلقة", nextArg)
                 }
                 else -> { // "vod"
                     val streamId = contentId.toIntOrNull() ?: return@launch
                     movieRepository.getMovieDetails(streamId).collect { resource ->
                         if (resource is Resource.Success) {
                             val movie = resource.data
-                            playUrl(urlBuilder.buildMovieUrl(streamId, movie.containerExtension), movie.title)
+                            playUrl(urlBuilder.buildMovieUrl(streamId, movie.containerExtension), movie.title, nextArg)
                         }
                     }
                 }
@@ -243,4 +244,81 @@ class PlayerViewModel @Inject constructor(
         onUserInteraction()
     }
 
-The file shown is earlier version; but branch shows not yet updated. We need to apply updated content. We already prepared content earlier and attempted create_or_update_file but for PlayerViewModel we haven't pushed. Now call create_or_update_file to update file. Need the current sha for the file on branch feat/playback-improvements: getfile returned blobSha 9299c966... We must use that as sha param. Prepare content exact as earlier full file we proposed— which we posted earlier; let's use that content (we had full file content earlier in assistant message). Use functions.create_or_update_file with branch feat/playback-improvements, path, content, message, sha existing. Let's call. We'll include sha 
+    fun retry() {
+        when (_uiState.value.activeEngine) {
+            ActiveEngine.EXOPLAYER -> exoPlayer.prepare()
+            ActiveEngine.LIBMPV -> mpvController.retry()
+        }
+    }
+
+    /** يسمح للمستخدم بفرض التبديل يدوياً من الإعدادات السريعة داخل المشغل (مستقبلاً) */
+    fun switchEngineManually(engine: ActiveEngine) {
+        if (engine == _uiState.value.activeEngine) return
+        if (engine == ActiveEngine.LIBMPV) startWithMpv(currentUrl) else startWithExoPlayer(currentUrl)
+    }
+
+    private fun scheduleAutoHide() {
+        autoHideJob?.cancel()
+        autoHideJob = viewModelScope.launch {
+            delay(4000)
+            _uiState.value = _uiState.value.copy(isControlsVisible = false)
+        }
+    }
+
+    private fun trackExoProgress() {
+        viewModelScope.launch {
+            while (true) {
+                delay(1000)
+                if (_uiState.value.activeEngine == ActiveEngine.EXOPLAYER) {
+                    val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                    val dur = exoPlayer.duration.coerceAtLeast(0L)
+                    _uiState.value = _uiState.value.copy(positionMillis = pos, durationMillis = dur)
+
+                    // Save periodically for VOD
+                    if (_uiState.value.contentType == PlaybackContentType.VOD && pos > 0 && dur > 0) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastSavedAtMillis >= SAVE_PROGRESS_INTERVAL_MS) {
+                            lastSavedAtMillis = now
+                            viewModelScope.launch {
+                                libraryRepository.saveWatchProgress(
+                                    contentId = contentId,
+                                    contentType = com.iptv.smartplayer.data.local.entity.ContentType.MOVIE,
+                                    title = _uiState.value.title,
+                                    posterUrl = null,
+                                    positionMillis = pos,
+                                    durationMillis = dur,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        viewModelScope.launch {
+            if (_uiState.value.contentType == PlaybackContentType.VOD) {
+                libraryRepository.saveWatchProgress(
+                    contentId = contentId,
+                    contentType = com.iptv.smartplayer.data.local.entity.ContentType.MOVIE,
+                    title = _uiState.value.title,
+                    posterUrl = null,
+                    positionMillis = _uiState.value.positionMillis,
+                    durationMillis = _uiState.value.durationMillis,
+                )
+            }
+        }
+        exoPlayer.release()
+        mpvController.release()
+        super.onCleared()
+    }
+}
+
+// Helper صغير لقراءة أول قيمة من Flow التفضيلات دون كسر تسلسل init{} أعلاه
+private suspend fun kotlinx.coroutines.flow.Flow<PlayerEngineType>.firstOrAuto(): PlayerEngineType =
+    try {
+        kotlinx.coroutines.flow.first(this)
+    } catch (e: Exception) {
+        PlayerEngineType.AUTO
+    }
