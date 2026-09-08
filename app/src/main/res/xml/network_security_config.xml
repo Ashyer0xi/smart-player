@@ -1,9 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- بعض سيرفرات Xtream Codes تعمل عبر HTTP فقط (بدون TLS) — نسمح بذلك صراحة هنا -->
+<!-- تقييد الاتصالات غير المشفَّرة (HTTP) إلى دومينات محددة فقط.
+   استبدل example-xtream.com بالقائمة الحقيقية لمزودي Xtream لديك. -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <!-- سياسة افتراضية: منع cleartext للتطبيق كله -->
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+
+    <!-- استثناءات per-domain للسماح بـ HTTP لمزودين محددين -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">example-xtream.com</domain>
+        <!-- أضف دومينات أخرى هنا، أحد كل سطر -->
+        <!-- <domain includeSubdomains="true">another-xtream.example</domain> -->
+    </domain-config>
+
+    <!-- مثال: السماح بالاتصالات المحلية للاختبار -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
 </network-security-config>
