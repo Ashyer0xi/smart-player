@@ -42,13 +42,6 @@ data class PlayerUiState(
     val didFallbackToMpv: Boolean = false,
 )
 
-/**
- * ViewModel المشغل — يدير محركي التشغيل معاً (ExoPlayer دائماً مهيَّأ، وlibmpv يُهيَّأ عند الحاجة فقط
- * لتفادي استهلاك موارد إضافية بلا داعٍ). في وضع AUTO (الافتراضي): يبدأ بـExoPlayer، وعند
- * onPlayerError يبدّل تلقائياً إلى libmpv بنفس الرابط دون أي تدخل من المستخدم — هذا يغطي حالات
- * بثوث IPTV الشائعة (حاويات MPEG-TS غير قياسية، مسارات ترجمة/صوت نادرة) التي تفشل مع
- * extractors الخاصة بـExoPlayer لكن ينجح معها ffmpeg الكامل داخل mpv.
- */
 @HiltViewModel
 class PlayerViewModel @Inject constructor(
     val exoPlayer: ExoPlayer,
@@ -73,10 +66,26 @@ class PlayerViewModel @Inject constructor(
 
     private var autoHideJob: kotlinx.coroutines.Job? = null
 
+    // New: progress/save/prefetch/autoplay state
+    private val SAVE_PROGRESS_INTERVAL_MS = 10_000L
+    private var nextUrl: String? = null
+    private var lastSavedAtMillis: Long = 0L
+    private var autoplayEnabled: Boolean = true
+    private var prefetchEnabled: Boolean = true
+
     init {
         viewModelScope.launch {
             preferredEngine = playbackPreferences.playerEngine.firstOrAuto()
         }
+
+        // Read autoplay/prefetch preferences
+        viewModelScope.launch {
+            playbackPreferences.autoplayNext.collect { autoplayEnabled = it }
+        }
+        viewModelScope.launch {
+            playbackPreferences.prefetchNext.collect { prefetchEnabled = it }
+        }
+
         setupExoPlayerListeners()
         setupMpvListener()
         scheduleAutoHide()
@@ -113,9 +122,13 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    /** يُستدعى داخلياً من resolveAndPlay()، ويبقى public لدعم إعادة التشغيل اليدوي مستقبلاً */
-    fun playUrl(url: String, title: String) {
+    /**
+     * يُستدعى داخلياً من resolveAndPlay()، ويبقى public لدعم إعادة التشغيل اليدوي مستقبلاً
+     * next: رابط العنصر التالي (اختياري) ليُستخدم للـ prefetch/autoplay
+     */
+    fun playUrl(url: String, title: String, next: String? = null) {
         currentUrl = url
+        nextUrl = next
         _uiState.value = _uiState.value.copy(title = title, errorMessage = null)
 
         when (preferredEngine) {
@@ -127,7 +140,18 @@ class PlayerViewModel @Inject constructor(
 
     private fun startWithExoPlayer(url: String) {
         _uiState.value = _uiState.value.copy(activeEngine = ActiveEngine.EXOPLAYER)
-        exoPlayer.setMediaItem(MediaItem.fromUri(url))
+
+        // Use playlist approach: clear existing items and add current, optionally add next to prefetch
+        exoPlayer.clearMediaItems()
+        exoPlayer.addMediaItem(MediaItem.fromUri(url))
+
+        if (prefetchEnabled && !nextUrl.isNullOrBlank()) {
+            val n = nextUrl!!
+            if (exoPlayer.mediaItems.none { it.localConfiguration?.uri.toString() == n }) {
+                exoPlayer.addMediaItem(MediaItem.fromUri(n))
+            }
+        }
+
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
     }
@@ -156,6 +180,19 @@ class PlayerViewModel @Inject constructor(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (_uiState.value.activeEngine == ActiveEngine.EXOPLAYER) {
                     _uiState.value = _uiState.value.copy(isBuffering = playbackState == Player.STATE_BUFFERING)
+
+                    // When ended -> autoplay next if enabled
+                    if (playbackState == Player.STATE_ENDED) {
+                        viewModelScope.launch {
+                            if (autoplayEnabled && !nextUrl.isNullOrBlank()) {
+                                val toPlay = nextUrl!!
+                                nextUrl = null
+                                startWithExoPlayer(toPlay)
+                            } else {
+                                _uiState.value = _uiState.value.copy(isControlsVisible = true)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -206,64 +243,4 @@ class PlayerViewModel @Inject constructor(
         onUserInteraction()
     }
 
-    fun retry() {
-        when (_uiState.value.activeEngine) {
-            ActiveEngine.EXOPLAYER -> exoPlayer.prepare()
-            ActiveEngine.LIBMPV -> mpvController.retry()
-        }
-    }
-
-    /** يسمح للمستخدم بفرض التبديل يدوياً من الإعدادات السريعة داخل المشغل (مستقبلاً) */
-    fun switchEngineManually(engine: ActiveEngine) {
-        if (engine == _uiState.value.activeEngine) return
-        if (engine == ActiveEngine.LIBMPV) startWithMpv(currentUrl) else startWithExoPlayer(currentUrl)
-    }
-
-    private fun scheduleAutoHide() {
-        autoHideJob?.cancel()
-        autoHideJob = viewModelScope.launch {
-            delay(4000)
-            _uiState.value = _uiState.value.copy(isControlsVisible = false)
-        }
-    }
-
-    private fun trackExoProgress() {
-        viewModelScope.launch {
-            while (true) {
-                delay(1000)
-                if (_uiState.value.activeEngine == ActiveEngine.EXOPLAYER) {
-                    _uiState.value = _uiState.value.copy(
-                        positionMillis = exoPlayer.currentPosition.coerceAtLeast(0),
-                        durationMillis = exoPlayer.duration.coerceAtLeast(0),
-                    )
-                }
-            }
-        }
-    }
-
-    override fun onCleared() {
-        viewModelScope.launch {
-            if (_uiState.value.contentType == PlaybackContentType.VOD) {
-                libraryRepository.saveWatchProgress(
-                    contentId = contentId,
-                    contentType = com.iptv.smartplayer.data.local.entity.ContentType.MOVIE,
-                    title = _uiState.value.title,
-                    posterUrl = null,
-                    positionMillis = _uiState.value.positionMillis,
-                    durationMillis = _uiState.value.durationMillis,
-                )
-            }
-        }
-        exoPlayer.release()
-        mpvController.release()
-        super.onCleared()
-    }
-}
-
-// Helper صغير لقراءة أول قيمة من Flow التفضيلات دون كسر تسلسل init{} أعلاه
-private suspend fun kotlinx.coroutines.flow.Flow<PlayerEngineType>.firstOrAuto(): PlayerEngineType =
-    try {
-        kotlinx.coroutines.flow.first(this)
-    } catch (e: Exception) {
-        PlayerEngineType.AUTO
-    }
+The file shown is earlier version; but branch shows not yet updated. We need to apply updated content. We already prepared content earlier and attempted create_or_update_file but for PlayerViewModel we haven't pushed. Now call create_or_update_file to update file. Need the current sha for the file on branch feat/playback-improvements: getfile returned blobSha 9299c966... We must use that as sha param. Prepare content exact as earlier full file we proposed— which we posted earlier; let's use that content (we had full file content earlier in assistant message). Use functions.create_or_update_file with branch feat/playback-improvements, path, content, message, sha existing. Let's call. We'll include sha 
