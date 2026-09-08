@@ -1,5 +1,8 @@
 package com.iptv.smartplayer.presentation.navigation
 
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+
 /**
  * تعريف كل مسارات التنقل في التطبيق في مكان واحد لتفادي أخطاء الطباعة اليدوية للمسارات
  * وتسهيل تمرير المعرّفات (IDs) عبر الشاشات.
@@ -23,10 +26,20 @@ sealed class Screen(val route: String) {
         const val ARG_SERIES_ID = "seriesId"
     }
 
-    data object Player : Screen("player/{contentType}/{contentId}") {
-        fun createRoute(contentType: String, contentId: String) = "player/$contentType/$contentId"
+    // Player route now supports an optional query parameter `next` containing the next item's id/uri (URL encoded)
+    data object Player : Screen("player/{contentType}/{contentId}?next={next}") {
         const val ARG_CONTENT_TYPE = "contentType"
         const val ARG_CONTENT_ID = "contentId"
+        const val ARG_NEXT = "next"
+
+        fun createRoute(contentType: String, contentId: String, next: String? = null): String {
+            return if (next.isNullOrBlank()) {
+                "player/$contentType/$contentId"
+            } else {
+                val encoded = URLEncoder.encode(next, StandardCharsets.UTF_8.toString())
+                "player/$contentType/$contentId?next=$encoded"
+            }
+        }
     }
 }
 
