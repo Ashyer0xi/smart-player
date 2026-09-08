@@ -46,7 +46,7 @@ import com.iptv.smartplayer.presentation.theme.LocalIptvTypography
  */
 @Composable
 fun SeriesDetailsScreen(
-    onEpisodeClick: (Episode) -> Unit,
+    onEpisodeClick: (Episode, String?) -> Unit,
     viewModel: SeriesDetailsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -132,7 +132,11 @@ fun SeriesDetailsScreen(
         items(state.currentEpisodes) { episode ->
             EpisodeRow(
                 episode = episode,
-                onClick = { onEpisodeClick(episode) },
+                onClick = {
+                    val idx = state.currentEpisodes.indexOf(episode)
+                    val nextId = state.currentEpisodes.getOrNull(idx + 1)?.id
+                    onEpisodeClick(episode, nextId)
+                },
                 modifier = Modifier.padding(horizontal = IptvDimens.tvOverscanMargin, vertical = 8.dp),
             )
         }
